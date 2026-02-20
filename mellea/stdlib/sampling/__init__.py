@@ -10,6 +10,8 @@ from .base import (
 )
 from .sofai import SOFAISamplingStrategy
 
+from .adaptive import AdaptiveRepairStrategy
+
 __all__ = [
     "BaseSamplingStrategy",
     "MultiTurnStrategy",
@@ -17,4 +19,5 @@ __all__ = [
     "RepairTemplateStrategy",
     "SamplingResult",
     "SamplingStrategy",
+    "AdaptiveRepairStrategy"
 ]
