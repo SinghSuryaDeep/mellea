@@ -154,6 +154,22 @@ email_v1 = m.instruct(
 print(f"***** email ****\n{str(email_v1)}\n*******")
 ```
 
+Mellea provides four built-in sampling strategies for the repair step. For tasks with multiple
+strict constraints, `AdaptiveRepairStrategy` provides stronger feedback by tracking failure
+history across attempts and escalating the repair message for requirements that fail repeatedly:
+
+```python
+from mellea.stdlib.sampling import AdaptiveRepairStrategy
+
+email_v1 = m.instruct(
+    "Write an email to invite all interns to the office party.",
+    requirements=["be formal", "Use 'Dear interns' as greeting.", "Keep it under 100 words"],
+    strategy=AdaptiveRepairStrategy(loop_budget=4),
+)
+```
+
+See [`docs/examples/instruct_validate_repair/`](docs/examples/instruct_validate_repair/) for a full strategy comparison.
+
 
 ## Getting Started with Generative Slots
 

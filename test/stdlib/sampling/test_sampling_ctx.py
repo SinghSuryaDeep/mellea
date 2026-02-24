@@ -4,7 +4,7 @@ from mellea import start_session
 from mellea.backends import ModelOption
 from mellea.core import Context, ModelOutputThunk, Requirement, SamplingResult
 from mellea.stdlib.context import ChatContext
-from mellea.stdlib.sampling import MultiTurnStrategy, RejectionSamplingStrategy
+from mellea.stdlib.sampling import AdaptiveRepairStrategy, MultiTurnStrategy, RejectionSamplingStrategy
 
 
 @pytest.fixture(scope="class")
@@ -81,6 +81,29 @@ class TestSamplingCtxCase:
         )
         assert len(m_session.last_prompt()) == len(res.sample_generations) * 2 - 1, (  # type: ignore
             "For n sampling iterations there should be 2n-1 prompt conversation elements in the last prompt."
+        )
+
+    def test_ctx_for_adaptive_repair(self, m_session):
+        m_session.reset()
+        res = m_session.instruct(
+            "Write a sentence.",
+            requirements=[
+                "be funny",
+                "be formal",
+                "use only words starting with the letter w",
+            ],
+            strategy=AdaptiveRepairStrategy(loop_budget=3),
+            return_sampling_results=True,
+        )
+
+        self._run_asserts_for_ctx_testing(res)
+        # AdaptiveRepairStrategy defaults to context_mode="reset", so context
+        # should only contain the final message + response (same as RejectionSampling).
+        assert len(m_session.ctx.as_list()) == 2, (
+            "there should only be a message and a response in the ctx."
+        )
+        assert len(m_session.last_prompt()) == 1, (  # type: ignore
+            "Last prompt should only have one instruction inside - independent of sampling iterations."
         )
 
 

@@ -39,13 +39,34 @@ Shows how to use custom validation functions for complex requirements.
 - Using `simple_validate()` helper
 - Combining multiple validation strategies
 
+### strategy_comparison.py
+Benchmarks all four sampling strategies on the same tasks, measuring success
+rate, average attempts, and requirements passed on the first attempt.
+
+**Key Features:**
+- Side-by-side comparison of all four built-in strategies
+- Configurable tasks, loop budget, and number of trials
+- Tabular results report showing where strategies differ
+
 ## Concepts Demonstrated
 
 - **Instruct**: Generating outputs with natural language instructions
 - **Validate**: Checking outputs against requirements
 - **Repair**: Automatically fixing outputs that fail validation
 - **Requirements**: Constraining outputs with natural language or functions
-- **Sampling Strategies**: Using rejection sampling for reliable outputs
+- **Sampling Strategies**: Choosing the right repair strategy for reliable outputs
+
+## Sampling Strategies
+
+Mellea provides four built-in strategies. All share the same loop (`loop_budget`
+attempts) but differ in how they handle failures between attempts:
+
+| Strategy | Repair behaviour | Best for |
+|---|---|---|
+| `RejectionSamplingStrategy` | Retries with the same prompt (no feedback) | Quick baseline; tasks the model usually passes first try |
+| `RepairTemplateStrategy` | Appends a list of failed requirements to the prompt | General use; simple constraint feedback |
+| `MultiTurnStrategy` | Adds failure feedback as a new chat turn | Larger models that benefit from conversation history |
+| `AdaptiveRepairStrategy` | Tracks failure history across all attempts; escalates language for repeated failures; shows the failed output | Hard tasks with multiple constraints; repeated failures |
 
 ## Basic Pattern
 
@@ -72,17 +93,29 @@ print(result)
 
 ```python
 from mellea.stdlib.requirements import simple_validate, req
-from mellea.stdlib.sampling import RejectionSamplingStrategy
+from mellea.stdlib.sampling import RejectionSamplingStrategy, AdaptiveRepairStrategy
 
 def check_length(text: str) -> bool:
     return len(text.split()) < 50
 
+# Simple baseline strategy
 result = m.instruct(
     "Write an email...",
     requirements=[
         req("Under 50 words", validation_fn=simple_validate(check_length))
     ],
     strategy=RejectionSamplingStrategy(loop_budget=3)
+)
+
+# Adaptive strategy — better for tasks with multiple strict constraints
+result = m.instruct(
+    "Write an email...",
+    requirements=[
+        req("Under 50 words", validation_fn=simple_validate(check_length)),
+        "Be formal",
+        "Include a greeting",
+    ],
+    strategy=AdaptiveRepairStrategy(loop_budget=4)
 )
 ```
 

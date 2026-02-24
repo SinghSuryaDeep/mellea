@@ -208,6 +208,22 @@ Even with retries, sampling might not generate results that fulfill all requirem
 Mellea forces you to think about what it means for an LLM call to fail;
 in this case, we handle the situation by simply returning the first sample as the final result.
 
+> [!TIP]
+> Mellea provides four built-in sampling strategies, each with a different repair behaviour:
+>
+> | Strategy | What it does on failure |
+> |---|---|
+> | `RejectionSamplingStrategy` | Retries with the same prompt — no feedback given |
+> | `RepairTemplateStrategy` | Appends a list of failed requirements to the prompt |
+> | `MultiTurnStrategy` | Adds failure feedback as a new chat turn (grows conversation) |
+> | `AdaptiveRepairStrategy` | Tracks failure history across all attempts; escalates language for repeated failures; shows the model its failed output |
+>
+> For tasks with multiple strict constraints where `RejectionSamplingStrategy` frequently fails, `AdaptiveRepairStrategy` is a stronger drop-in replacement:
+> ```python
+> from mellea.stdlib.sampling import AdaptiveRepairStrategy
+> strategy = AdaptiveRepairStrategy(loop_budget=4)
+> ```
+
 > [!NOTE]
 > When using the `return_sampling_results=True` parameter, the `instruct()` function returns a `SamplingResult` object (not a `ModelOutputThunk`) which carries the full history of sampling and validation results for each sample.
 
