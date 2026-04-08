@@ -21,9 +21,10 @@ class TestAdaptiveRepairStrategyInit:
     def test_default_init(self):
         strategy = AdaptiveRepairStrategy()
         assert strategy.loop_budget == 3
-        assert strategy.max_output_snippet_length == 500
-        assert strategy.include_improvement_hints is True
-        assert strategy.context_mode == "reset"
+        assert strategy.escalation_style == "gentle"
+        assert strategy.max_output_snippet_length == 0      # gentle default
+        assert strategy.include_improvement_hints is False  # gentle default
+        assert strategy.context_mode == "auto"
 
     def test_custom_init(self):
         strategy = AdaptiveRepairStrategy(
@@ -42,7 +43,7 @@ class TestAdaptiveRepairStrategyInit:
             AdaptiveRepairStrategy(loop_budget=0)
 
     def test_invalid_context_mode_raises(self):
-        with pytest.raises(ValueError, match="context_mode must be"):
+        with pytest.raises(ValueError, match="context_mode must be 'auto'"):
             AdaptiveRepairStrategy(context_mode="invalid")
 
     def test_repr(self):
@@ -188,18 +189,37 @@ class TestFormatEscalationPrefix:
     """Test AdaptiveRepairStrategy._format_escalation_prefix."""
 
     def test_normal_prefix(self):
+        # gentle (default) — plain bullet regardless of level
         prefix = AdaptiveRepairStrategy._format_escalation_prefix(EscalationLevel.NORMAL, 1)
-        assert prefix == "• Issue"
+        assert prefix == "•"
 
     def test_important_prefix(self):
-        prefix = AdaptiveRepairStrategy._format_escalation_prefix(EscalationLevel.IMPORTANT, 2)
+        # standard — escalating language
+        prefix = AdaptiveRepairStrategy._format_escalation_prefix(
+            EscalationLevel.IMPORTANT, 2, escalation_style="standard"
+        )
         assert "Important" in prefix
         assert "2x" in prefix
 
     def test_critical_prefix(self):
-        prefix = AdaptiveRepairStrategy._format_escalation_prefix(EscalationLevel.CRITICAL, 4)
+        # standard — escalating language
+        prefix = AdaptiveRepairStrategy._format_escalation_prefix(
+            EscalationLevel.CRITICAL, 4, escalation_style="standard"
+        )
         assert "CRITICAL" in prefix
         assert "4x" in prefix
+
+    def test_gentle_style_always_plain_bullet(self):
+        for level in EscalationLevel:
+            prefix = AdaptiveRepairStrategy._format_escalation_prefix(
+                level, 5, escalation_style="gentle"
+            )
+            assert prefix == "•", f"Expected plain bullet for level {level}, got {prefix!r}"
+
+    def test_invalid_escalation_style_raises(self):
+        import pytest
+        with pytest.raises(ValueError, match="escalation_style must be one of"):
+            AdaptiveRepairStrategy(escalation_style="turbo")
 
 
 class TestBuildRepairMessage:

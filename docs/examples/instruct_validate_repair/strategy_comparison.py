@@ -29,7 +29,7 @@ from mellea.stdlib.sampling import (
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
-MODEL_ID = "llama3.2:1b"   # Change to any model available in your Ollama
+MODEL_ID = "gpt-oss:20b"   # Change to any model available in your Ollama
 LOOP_BUDGET = 4            # Max attempts per trial
 TRIALS = 5                 # Number of times each (strategy, task) pair is run
 

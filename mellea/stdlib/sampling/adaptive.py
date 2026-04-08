@@ -8,9 +8,30 @@ all attempts and provides increasingly specific feedback.
 Key Features:
     - Tracks failure patterns across all iterations (not just the last one)
     - Prioritizes requirements by failure frequency and validation score
-    - Escalates language for repeatedly failing requirements
-    - Includes the failed output in feedback for better context
+    - Escalates language for repeatedly failing requirements (configurable intensity)
+    - Optionally includes the failed output in feedback for better context
     - Selects the best failed attempt (most requirements passed) when budget exhausts
+
+Escalation Styles
+-----------------
+Benchmarking revealed that feedback intensity should match task type:
+
+  "gentle"     — plain bullet points, no emojis, no output snippet, no hints.
+                 Best for creative/open-ended tasks where heavy feedback causes
+                 requirement thrashing (model fixes flagged items but breaks others).
+
+  "standard"   — escalating prefixes (Issue → Important → CRITICAL) with output
+                 snippet and improvement hints. Best for tasks with precise,
+                 countable constraints (exact word counts, syllable counts, etc.)
+                 where the model can directly act on specific numeric feedback.
+
+  "aggressive" — same as standard but snippet is always included and hints are
+                 always shown even on the first repair attempt. Use when the model
+                 is strong enough to handle rich context without thrashing.
+
+Rule of thumb:
+    - Exact counts / forbidden words / structural constraints → "standard" or "aggressive"
+    - Creative writing / open-ended style constraints         → "gentle"
 """
 
 from __future__ import annotations
@@ -136,10 +157,12 @@ class AdaptiveRepairStrategy(BaseSamplingStrategy):
        first and emphasized more strongly in the repair message.
 
     3. **Escalating language**: Uses progressively stronger language for
-       requirements that fail multiple times ("Issue" -> "Important" -> "CRITICAL").
+       requirements that fail multiple times, with intensity controlled by
+       ``escalation_style`` ("gentle", "standard", or "aggressive").
 
-    4. **Including context**: Shows a snippet of the failed output so the model
-       can see exactly what was wrong.
+    4. **Including context**: Optionally shows a snippet of the failed output so
+       the model can see exactly what was wrong (controlled by
+       ``max_output_snippet_length``).
 
     5. **Smart failure selection**: When all attempts fail, returns the attempt
        that passed the most requirements (not just the first one).
@@ -147,46 +170,102 @@ class AdaptiveRepairStrategy(BaseSamplingStrategy):
     Args:
         loop_budget: Maximum number of attempts before giving up. Must be >= 1.
         requirements: Optional list of requirements to override instruction requirements.
+        escalation_style: Controls feedback intensity. One of:
+
+            - ``"gentle"`` *(default)* — plain bullet points, no emojis, no output
+              snippet, no improvement hints. Avoids requirement thrashing on
+              creative/open-ended tasks.
+            - ``"standard"`` — escalating prefixes (Issue → Important → CRITICAL)
+              with output snippet and improvement hints enabled. Best for tasks
+              with countable/exact constraints.
+            - ``"aggressive"`` — same as standard but snippet and hints are always
+              shown even on the first repair attempt.
+
         max_output_snippet_length: Maximum characters of failed output to include
-            in feedback. Set to 0 to disable. Default is 500.
-        include_improvement_hints: If True, includes hints about what improved
-            between iterations. Default is True.
+            in feedback. Overrides the escalation_style default when set explicitly.
+            Set to 0 to disable. Default is ``None`` (use escalation_style default).
+        include_improvement_hints: Whether to include hints about what improved
+            between iterations. Overrides the escalation_style default when set
+            explicitly. Default is ``None`` (use escalation_style default).
         context_mode: How to handle context between attempts.
-            - "reset": Use the original context (default, like RepairTemplateStrategy)
-            - "continue": Continue with the current context (like MultiTurnStrategy)
+
+            - ``"auto"`` *(default)* — use ``new_ctx`` (continue) when the context
+              is a ChatContext (e.g. code tasks that need conversation history),
+              otherwise use ``old_ctx`` (reset). Recommended for most use cases.
+            - ``"reset"`` — always use the original context (like RepairTemplateStrategy)
+            - ``"continue"`` — always continue with the current context (like MultiTurnStrategy)
     """
+
+    #: Defaults applied per escalation_style. Explicit constructor args override these.
+    _STYLE_DEFAULTS: dict[str, dict] = {
+        "gentle": {
+            "max_output_snippet_length": 0,
+            "include_improvement_hints": False,
+        },
+        "standard": {
+            "max_output_snippet_length": 500,
+            "include_improvement_hints": True,
+        },
+        "aggressive": {
+            "max_output_snippet_length": 500,
+            "include_improvement_hints": True,
+        },
+    }
+
+    _VALID_STYLES = frozenset(_STYLE_DEFAULTS)
 
     def __init__(
         self,
         *,
         loop_budget: int = 3,
         requirements: list[Requirement] | None = None,
-        max_output_snippet_length: int = 500,
-        include_improvement_hints: bool = True,
-        context_mode: str = "reset",
+        escalation_style: str = "gentle",
+        max_output_snippet_length: int | None = None,
+        include_improvement_hints: bool | None = None,
+        context_mode: str = "auto",
     ):
         """Initialize the AdaptiveRepairStrategy.
 
         Args:
             loop_budget: Maximum number of attempts. Must be >= 1.
             requirements: Optional requirements to use instead of instruction requirements.
-            max_output_snippet_length: Max chars of output to show in feedback (0 to disable).
-            include_improvement_hints: Whether to mention improvements between iterations.
+            escalation_style: Feedback intensity — "gentle", "standard", or "aggressive".
+            max_output_snippet_length: Override snippet length (None = use style default).
+            include_improvement_hints: Override hint behaviour (None = use style default).
             context_mode: Either "reset" or "continue" for context handling.
 
         Raises:
-            ValueError: If loop_budget < 1 or context_mode is invalid.
+            ValueError: If loop_budget < 1, escalation_style is invalid, or
+                context_mode is invalid.
         """
         if loop_budget < 1:
             raise ValueError(f"loop_budget must be >= 1, got {loop_budget}")
-        if context_mode not in ("reset", "continue"):
+        if escalation_style not in self._VALID_STYLES:
             raise ValueError(
-                f"context_mode must be 'reset' or 'continue', got {context_mode!r}"
+                f"escalation_style must be one of {sorted(self._VALID_STYLES)}, "
+                f"got {escalation_style!r}"
+            )
+        if context_mode not in ("auto", "reset", "continue"):
+            raise ValueError(
+                f"context_mode must be 'auto', 'reset', or 'continue', got {context_mode!r}"
             )
 
         super().__init__(loop_budget=loop_budget, requirements=requirements)
-        self.max_output_snippet_length = max_output_snippet_length
-        self.include_improvement_hints = include_improvement_hints
+
+        self.escalation_style = escalation_style
+        style_defaults = self._STYLE_DEFAULTS[escalation_style]
+
+        # Apply explicit overrides; fall back to style defaults
+        self.max_output_snippet_length = (
+            max_output_snippet_length
+            if max_output_snippet_length is not None
+            else style_defaults["max_output_snippet_length"]
+        )
+        self.include_improvement_hints = (
+            include_improvement_hints
+            if include_improvement_hints is not None
+            else style_defaults["include_improvement_hints"]
+        )
         self.context_mode = context_mode
 
     @staticmethod
@@ -244,16 +323,26 @@ class AdaptiveRepairStrategy(BaseSamplingStrategy):
         return context
 
     @staticmethod
-    def _format_escalation_prefix(level: EscalationLevel, count: int) -> str:
-        """Format the prefix for a failure based on escalation level.
+    def _format_escalation_prefix(
+        level: EscalationLevel, count: int, escalation_style: str = "gentle"
+    ) -> str:
+        """Format the prefix for a failure based on escalation level and style.
 
         Args:
             level: The escalation level.
             count: The number of times this requirement has failed.
+            escalation_style: Controls language intensity ("gentle", "standard",
+                or "aggressive").
 
         Returns:
             A formatted prefix string.
         """
+        if escalation_style == "gentle":
+            # Plain bullets regardless of failure count — avoids thrashing on
+            # creative tasks where strong language destabilises the model.
+            return "•"
+
+        # "standard" and "aggressive" both use escalating language.
         if level == EscalationLevel.CRITICAL:
             return f"🚨 CRITICAL (failed {count}x)"
         elif level == EscalationLevel.IMPORTANT:
@@ -292,6 +381,7 @@ class AdaptiveRepairStrategy(BaseSamplingStrategy):
         repair_context: RepairContext,
         max_output_snippet_length: int,
         include_improvement_hints: bool,
+        escalation_style: str = "gentle",
     ) -> str:
         """Build the repair message from the repair context.
 
@@ -341,6 +431,7 @@ class AdaptiveRepairStrategy(BaseSamplingStrategy):
             prefix = AdaptiveRepairStrategy._format_escalation_prefix(
                 stats.escalation_level,
                 stats.failure_count,
+                escalation_style,
             )
 
             # Use the validation reason if available, otherwise use description
@@ -416,7 +507,12 @@ class AdaptiveRepairStrategy(BaseSamplingStrategy):
         )
 
         last_action = past_actions[-1]
-        ctx_to_use = old_ctx if self.context_mode == "reset" else new_ctx
+        if self.context_mode == "auto":
+            ctx_to_use = new_ctx if isinstance(new_ctx, ChatContext) else old_ctx
+        elif self.context_mode == "continue":
+            ctx_to_use = new_ctx
+        else:  # "reset"
+            ctx_to_use = old_ctx
 
         # Handle Instruction components (most common case)
         if isinstance(last_action, Instruction):
@@ -424,6 +520,7 @@ class AdaptiveRepairStrategy(BaseSamplingStrategy):
                 repair_context,
                 self.max_output_snippet_length,
                 self.include_improvement_hints,
+                self.escalation_style,
             )
             repaired_instruction = last_action.copy_and_repair(
                 repair_string=repair_message
@@ -440,6 +537,7 @@ class AdaptiveRepairStrategy(BaseSamplingStrategy):
                 repair_context,
                 self.max_output_snippet_length,
                 self.include_improvement_hints,
+                self.escalation_style,
             )
             next_action = Message(
                 role="user",
@@ -521,6 +619,7 @@ class AdaptiveRepairStrategy(BaseSamplingStrategy):
         return (
             f"AdaptiveRepairStrategy("
             f"loop_budget={self.loop_budget}, "
+            f"escalation_style={self.escalation_style!r}, "
             f"max_output_snippet_length={self.max_output_snippet_length}, "
             f"include_improvement_hints={self.include_improvement_hints}, "
             f"context_mode={self.context_mode!r})"
