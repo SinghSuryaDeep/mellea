@@ -39,14 +39,47 @@ import sys
 from mellea.core import Requirement
 from mellea.stdlib.requirements import simple_validate
 
-from _common import BenchmarkTask, print_benchmark_report, run_benchmark
+from _common import (
+    BenchmarkTask,
+    _parse_judge_response,
+    create_joint_validator,
+    ollama_judge,
+    print_benchmark_report,
+    run_benchmark,
+)
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
-MODEL_ID    = "gpt-oss:20b"
-LOOP_BUDGET = 4
-TRIALS      = 10
-SAMPLE_SIZE = 10   # number of ComplexBench tasks after filtering
+MODEL_ID      = "llama3.2:3b"
+JUDGE_MODEL_ID = "deepseek-r1:8b"
+LOOP_BUDGET   = 4
+TRIALS        = 10
+SAMPLE_SIZE   = 10   # number of ComplexBench tasks after filtering
+
+# ── Per-constraint judge validator ────────────────────────────────────────────
+
+def create_judge_validator(question_en: str, judge_model_id: str) -> "Callable":
+    """Per-constraint judge validator used for repair loop feedback.
+
+    Evaluates ONE constraint at a time. Used to drive AdaptiveRepair's
+    escalation logic — reason string is always the constraint text (not the
+    judge's words) so failure reasons stay stable across attempts.
+    """
+    def _check(out: str) -> tuple[bool, str]:
+        prompt = (
+            f'Given this model response:\n"""\n{out}\n"""\n\n'
+            f"Does it satisfy the following requirement?\n{question_en}\n\n"
+            f"Answer with only YES or NO."
+        )
+        try:
+            response = ollama_judge(prompt, judge_model_id)
+        except Exception as e:
+            return (False, f"Judge error: {e}")
+        passed = _parse_judge_response(response)
+        return (passed, "" if passed else question_en)
+
+    return simple_validate(_check)
+
 
 # ── Constraint verifiers ───────────────────────────────────────────────────────
 
@@ -321,12 +354,17 @@ _COMPLEXBENCH_URL = (
 )
 
 
-def load_complexbench_tasks(sample: int | None = SAMPLE_SIZE) -> list[BenchmarkTask]:
+def load_complexbench_tasks(
+    sample: int | None = SAMPLE_SIZE,
+    judge_model_id: str | None = JUDGE_MODEL_ID,
+) -> list[BenchmarkTask]:
     """Fetch ComplexBench from GitHub and return BenchmarkTask list.
 
     Downloads data/data_final.json from thu-coai/ComplexBench on GitHub,
-    converts Format-type scoring points to programmatic Requirements, and
-    drops tasks where no constraints are verifiable.
+    converts scoring points to programmatic Requirements. Constraints that
+    cannot be parsed programmatically fall back to an LLM judge
+    (judge_model_id). Pass judge_model_id=None to skip unverifiable constraints
+    (reverts to the original ~40% coverage behaviour).
     """
     import urllib.request
     import urllib.error
@@ -367,40 +405,73 @@ def load_complexbench_tasks(sample: int | None = SAMPLE_SIZE) -> list[BenchmarkT
         scoring_points = row.get("scoring_questions", row.get("scoring_points", []))
         total_constraints += len(scoring_points)
 
+        # Collect all constraint texts for the joint validator
+        constraint_texts: list[str] = []
         requirements = []
+
         for sp in scoring_points:
             if isinstance(sp, dict):
                 rule        = sp.get("rule") or ""
                 question_en = sp.get("question_en", sp.get("scoring_point", str(sp)))
-                # Try structured rule first (most precise), then heuristic parser
-                req = _parse_rule(rule, question_en) or _parse_constraint(question_en)
             else:
-                req = _parse_constraint(str(sp))
+                question_en = str(sp)
+                rule = ""
 
-            if req is not None:
-                requirements.append(req)
+            constraint_texts.append(question_en)
+
+            if judge_model_id is not None:
+                # Judge-primary: judge is always the authoritative verdict for
+                # all constraints. This matches the original ComplexBench paper
+                # which uses GPT-4 as the sole evaluator for all scoring questions.
+                requirements.append(
+                    Requirement(question_en, validation_fn=create_judge_validator(question_en, judge_model_id))
+                )
             else:
-                skipped_constraints += 1
+                # No judge: code-only, skip unverifiable
+                req = _parse_rule(rule, question_en) or _parse_constraint(question_en)
+                if req is not None:
+                    requirements.append(req)
+                else:
+                    skipped_constraints += 1
 
         if not requirements:
             skipped_tasks += 1
             continue
 
+        # Add joint compositional validator as the final requirement.
+        # This evaluates ALL constraints simultaneously — used for task-level
+        # pass/fail in scoring. Per-constraint validators above drive repair feedback.
+        joint_req_index = None
+        if judge_model_id is not None and len(constraint_texts) > 1:
+            joint_req = Requirement(
+                "All constraints satisfied simultaneously (joint)",
+                validation_fn=create_joint_validator(constraint_texts, judge_model_id, prompt),
+            )
+            joint_req_index = len(requirements)
+            requirements.append(joint_req)
+
         name = prompt[:60].replace("\n", " ").strip() + ("..." if len(prompt) > 60 else "")
-        tasks.append(BenchmarkTask(name=name, prompt=prompt, requirements=requirements))
+        tasks.append(BenchmarkTask(
+            name=name,
+            prompt=prompt,
+            requirements=requirements,
+            joint_req_index=joint_req_index,
+        ))
 
         if sample and len(tasks) >= sample:
             break
 
-    coverage = (
-        (total_constraints - skipped_constraints) / total_constraints * 100
-        if total_constraints else 0
-    )
+    if judge_model_id:
+        coverage_note = f"100% coverage — judge={judge_model_id} (primary evaluator)"
+    else:
+        skipped_pct = skipped_constraints / total_constraints * 100 if total_constraints else 0
+        coverage_note = (
+            f"{100 - skipped_pct:.0f}% programmatic coverage "
+            f"({skipped_constraints} constraints dropped — no judge configured)"
+        )
     print(
-        f"Loaded {len(tasks)} tasks "
-        f"({skipped_tasks} dropped — no verifiable constraints)\n"
-        f"Constraint coverage: {coverage:.0f}% verifiable programmatically "
-        f"({skipped_constraints} skipped — require LLM judge)"
+        f"Loaded {len(tasks)} tasks ({skipped_tasks} dropped — empty scoring_points)\n"
+        f"Constraint coverage: {coverage_note}"
     )
     return tasks
 
@@ -413,7 +484,8 @@ if __name__ == "__main__":
         idx    = sys.argv.index("--sample")
         sample = int(sys.argv[idx + 1])
 
-    tasks = load_complexbench_tasks(sample)
+    judge = None if "--no-judge" in sys.argv else JUDGE_MODEL_ID
+    tasks = load_complexbench_tasks(sample, judge_model_id=judge)
     if not tasks:
         print("No tasks loaded. Exiting.")
         sys.exit(1)

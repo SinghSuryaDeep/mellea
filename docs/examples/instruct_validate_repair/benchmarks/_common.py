@@ -6,17 +6,86 @@ used by all three benchmark scripts (infobench, multi_if, feedbackeval).
 
 from __future__ import annotations
 
+import json
+import urllib.request
 from dataclasses import dataclass, field
 from typing import Any
 
 from mellea import start_session
+from mellea.core import Requirement
 from mellea.stdlib.context import ChatContext
+from mellea.stdlib.requirements import simple_validate
 from mellea.stdlib.sampling import (
     AdaptiveRepairStrategy,
     MultiTurnStrategy,
     RejectionSamplingStrategy,
     RepairTemplateStrategy,
 )
+
+
+# ── Shared LLM judge infrastructure ───────────────────────────────────────────
+
+def ollama_judge(prompt: str, model_id: str) -> str:
+    """Synchronous Ollama API call for judge validation. Returns raw response text."""
+    body = json.dumps({"model": model_id, "prompt": prompt, "stream": False}).encode()
+    req = urllib.request.Request(
+        "http://localhost:11434/api/generate",
+        data=body,
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        return json.loads(resp.read())["response"]
+
+
+def _parse_judge_response(response: str) -> bool:
+    """Strip DeepSeek-R1 <think> block and return True if response starts with YES."""
+    if "</think>" in response:
+        response = response.split("</think>")[-1]
+    return response.strip().upper().startswith("YES")
+
+
+def create_joint_validator(
+    all_constraints: list[str],
+    judge_model_id: str,
+    original_instruction: str | None = None,
+) -> Any:
+    """Return a simple_validate-compatible validator that evaluates ALL constraints
+    simultaneously. Used as the authoritative signal for compositional scoring
+    (HSR/SSR/CSL in FollowBench, task-level pass/fail in ComplexBench).
+
+    Per-constraint validators drive the repair loop; this joint validator drives
+    final scoring metrics only.
+
+    Args:
+        all_constraints: All constraint texts that must be satisfied together.
+        judge_model_id: Ollama model ID used as judge (e.g. "deepseek-r1:8b").
+        original_instruction: Full original prompt, included as context for the
+            judge so it can evaluate constraints in the right framing.
+    """
+    def _check(out: str) -> tuple[bool, str]:
+        instr_block = (
+            f"Original instruction:\n{original_instruction}\n\n"
+            if original_instruction else ""
+        )
+        constraints_block = "\n".join(
+            f"{i + 1}. {c}" for i, c in enumerate(all_constraints)
+        )
+        prompt = (
+            f"{instr_block}"
+            f"The response must satisfy ALL of these constraints simultaneously:\n"
+            f"{constraints_block}\n\n"
+            f'Response:\n"""\n{out}\n"""\n\n'
+            f"Does the response satisfy ALL of the above constraints simultaneously?\n"
+            f"Answer with only YES or NO."
+        )
+        try:
+            raw = ollama_judge(prompt, judge_model_id)
+        except Exception as e:
+            return (False, f"Joint judge error: {e}")
+        passed = _parse_judge_response(raw)
+        return (passed, "" if passed else "Not all constraints satisfied simultaneously")
+
+    return simple_validate(_check)
 
 
 @dataclass
@@ -26,6 +95,9 @@ class BenchmarkTask:
     name: str
     prompt: str
     requirements: list[Any]  # str | Requirement
+    example_id: int | None = None      # FollowBench: source example identifier
+    level: int | None = None           # FollowBench: constraint difficulty level (1–5)
+    joint_req_index: int | None = None # index of joint compositional Requirement in requirements
 
 
 @dataclass
@@ -35,6 +107,8 @@ class TrialResult:
     success: bool
     attempts: int
     reqs_passed_per_attempt: list[int] = field(default_factory=list)
+    final_req_results: list[bool] = field(default_factory=list)
+    # ^ per-requirement pass/fail for the final selected attempt
 
 
 @dataclass
@@ -97,10 +171,14 @@ def run_trial(strategy: Any, task: BenchmarkTask, model_id: str) -> TrialResult:
         sum(1 for _, val in attempt_vals if val)
         for attempt_vals in result.sample_validations
     ]
+    # Per-requirement pass/fail for the final selected attempt
+    final_vals = result.sample_validations[result.result_index]
+    final_req_results = [bool(val) for _, val in final_vals]
     return TrialResult(
         success=result.success,
         attempts=len(result.sample_generations),
         reqs_passed_per_attempt=reqs_passed_per_attempt,
+        final_req_results=final_req_results,
     )
 
 

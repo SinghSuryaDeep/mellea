@@ -33,7 +33,7 @@ from _common import BenchmarkTask, print_benchmark_report, run_benchmark
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
-MODEL_ID    = "gpt-oss:20b"
+MODEL_ID    = "llama3.2:3b"
 LOOP_BUDGET = 4
 TRIALS      = 10
 SAMPLE_SIZE = 10   # number of IFEval prompts to test (None = all 541)
@@ -306,6 +306,64 @@ def load_ifeval_tasks(sample: int | None = SAMPLE_SIZE) -> list[BenchmarkTask]:
     return tasks
 
 
+# ── Official IFEval metrics ────────────────────────────────────────────────────
+
+def compute_ifeval_official_metrics(results: list, tasks: list) -> None:
+    """Compute and print the four official IFEval metrics for each strategy.
+
+    Prompt-level strict  : fraction of prompts where ALL requirements pass
+                           on the final selected attempt (= our success_rate).
+    Instruction-level strict: fraction of individual (prompt, requirement) pairs
+                           that pass on the final selected attempt.
+    Prompt-level loose   : same as strict — our validators already normalise
+                           text (lowercase, whitespace), so strict ≈ loose.
+    Instruction-level loose: same as instruction-level strict for same reason.
+
+    Note: For exact numbers comparable to the Google IFEval leaderboard, run
+    the official evaluation script from github.com/google-research/google-research/
+    tree/master/instruction_following_eval on the collected model outputs.
+    """
+    strategy_order = ["RejectionSampling", "RepairTemplate", "MultiTurn", "AdaptiveRepair"]
+    strategies = [s for s in strategy_order if any(r.strategy_name == s for r in results)]
+
+    print("\n" + "=" * 80)
+    print("OFFICIAL IFEval METRICS")
+    print("Note: loose reported = strict here. Official loose applies response")
+    print("transformations (strip first line / headers / bullets) before re-checking.")
+    print("For exact loose numbers run the official Google IFEval eval script.")
+    print("-" * 80)
+    print(f"{'Strategy':<20} {'Prompt-Strict':>14} {'Instr-Strict':>14} {'Prompt-Loose':>14} {'Instr-Loose':>14}")
+    print("-" * 80)
+
+    for strategy_name in strategies:
+        strategy_results = [r for r in results if r.strategy_name == strategy_name]
+
+        # Prompt-level strict = success_rate per task, averaged across tasks
+        prompt_strict_vals = [r.success_rate for r in strategy_results]
+        prompt_strict = sum(prompt_strict_vals) / len(prompt_strict_vals) if prompt_strict_vals else 0.0
+
+        # Instruction-level strict = fraction of individual requirements that pass
+        # Computed from final_req_results across all trials and tasks
+        all_req_results: list[bool] = []
+        for bench in strategy_results:
+            for trial in bench.trials:
+                all_req_results.extend(trial.final_req_results)
+        instr_strict = sum(all_req_results) / len(all_req_results) if all_req_results else 0.0
+
+        # Loose ≈ strict for our validators (they already normalise comparisons)
+        prompt_loose = prompt_strict
+        instr_loose  = instr_strict
+
+        print(
+            f"{strategy_name:<20} "
+            f"{prompt_strict*100:>13.1f}% "
+            f"{instr_strict*100:>13.1f}% "
+            f"{prompt_loose*100:>13.1f}% "
+            f"{instr_loose*100:>13.1f}%"
+        )
+    print("=" * 80 + "\n")
+
+
 # ── Entry point ────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -325,3 +383,4 @@ if __name__ == "__main__":
 
     results = run_benchmark(tasks, MODEL_ID, LOOP_BUDGET, TRIALS)
     print_benchmark_report(results, tasks, "IFEval", MODEL_ID, LOOP_BUDGET, TRIALS)
+    compute_ifeval_official_metrics(results, tasks)
