@@ -66,31 +66,19 @@ SAMPLE_SIZE = None   # None = all 541 prompts; set to e.g. 50 for a quick test
 
 # ── Five strategies ────────────────────────────────────────────────────────────
 
-def get_all_strategies(
-    loop_budget: int,
-    escalation_style: str = "gentle",
-) -> list[tuple[str, any]]:
+def get_all_strategies(loop_budget: int) -> list[tuple[str, any]]:
     """Return all five strategies including NoRepair baseline.
 
     Args:
         loop_budget: Max attempts for repair strategies (NoRepair always uses 1).
-        escalation_style: AdaptiveRepair feedback intensity.
-            "gentle"     — plain bullets, no snippet, no hints (default).
-            "standard"   — escalating prefixes + snippet + hints. Best for IFEval.
-            "aggressive" — same as standard, snippet/hints shown from attempt 1.
     """
     return [
         # NoRepair: one generation, no retry — matches original IFEval one-shot eval
         ("NoRepair",          RejectionSamplingStrategy(loop_budget=1)),
-        # Standard repair strategies — unaffected by escalation_style
         ("RejectionSampling", RejectionSamplingStrategy(loop_budget=loop_budget)),
         ("RepairTemplate",    RepairTemplateStrategy(loop_budget=loop_budget)),
         ("MultiTurn",         MultiTurnStrategy(loop_budget=loop_budget)),
-        # AdaptiveRepair uses escalation_style
-        ("AdaptiveRepair",    AdaptiveRepairStrategy(
-            loop_budget=loop_budget,
-            escalation_style=escalation_style,
-        )),
+        ("AdaptiveRepair",    AdaptiveRepairStrategy(loop_budget=loop_budget)),
     ]
 
 # ── Response transformations for loose criterion ───────────────────────────────
@@ -724,10 +712,9 @@ class _Tee:
 if __name__ == "__main__":
     import datetime
 
-    sample           = SAMPLE_SIZE
-    model_id         = MODEL_ID
-    escalation_style = "gentle"   # override with --escalation-style
-    log_file         = None
+    sample   = SAMPLE_SIZE
+    model_id = MODEL_ID
+    log_file = None
 
     if "--sample" in sys.argv:
         idx    = sys.argv.index("--sample")
@@ -737,20 +724,13 @@ if __name__ == "__main__":
     if "--model" in sys.argv:
         idx      = sys.argv.index("--model")
         model_id = sys.argv[idx + 1]
-    if "--escalation-style" in sys.argv:
-        idx              = sys.argv.index("--escalation-style")
-        escalation_style = sys.argv[idx + 1]
-        if escalation_style not in ("gentle", "standard", "aggressive"):
-            print(f"ERROR: --escalation-style must be gentle, standard, or aggressive. Got: {escalation_style!r}")
-            sys.exit(1)
     if "--log-file" in sys.argv:
         idx      = sys.argv.index("--log-file")
         log_file = sys.argv[idx + 1]
     else:
-        # Auto-generate: ifeval_<model>_<escalation>_<timestamp>.log
         ts         = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         safe_model = model_id.replace(":", "-").replace("/", "-")
-        log_file   = f"ifeval_{safe_model}_{escalation_style}_{ts}.log"
+        log_file   = f"ifeval_{safe_model}_{ts}.log"
 
     # Install tee — from this point all print() output goes to terminal + file
     tee = _Tee(log_file)
@@ -765,12 +745,10 @@ if __name__ == "__main__":
     total_reqs = sum(len(t.requirements) for t in tasks)
     n_prompts  = len(tasks)
     print(f"\nIFEval: {n_prompts} prompts, {total_reqs} total requirements")
-    print(f"Model: {model_id}  |  loop_budget={LOOP_BUDGET}  |  trials={TRIALS}  |  escalation_style={escalation_style}")
+    print(f"Model: {model_id}  |  loop_budget={LOOP_BUDGET}  |  trials={TRIALS}")
     print(f"Strategies: NoRepair + 4 repair strategies ({TRIALS} trial each)\n")
-    print(f"Note: escalation_style only affects AdaptiveRepair.")
-    print(f"      gentle=plain bullets  standard=escalating+snippet  aggressive=standard from attempt 1\n")
 
-    strategies  = get_all_strategies(LOOP_BUDGET, escalation_style)
+    strategies  = get_all_strategies(LOOP_BUDGET)
     results     = []
     total_runs  = len(strategies) * len(tasks) * TRIALS
     done        = 0
@@ -819,7 +797,7 @@ if __name__ == "__main__":
 
     print("\n" + "=" * 84)
     print(f"IFEval (541 prompts) RESULTS")
-    print(f"Model: {model_id}  |  loop_budget={LOOP_BUDGET}  |  trials={TRIALS}  |  escalation_style={escalation_style}")
+    print(f"Model: {model_id}  |  loop_budget={LOOP_BUDGET}  |  trials={TRIALS}")
     print("=" * 84)
 
     for task in tasks:
